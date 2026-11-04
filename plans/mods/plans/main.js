@@ -20,6 +20,27 @@ function ticketState(raw) {
   return "todo";
 }
 
+// A TO-DO ticket is ready when every ticket in its Blocked by is complete, else waiting.
+function settle(tickets) {
+  const done = new Set(tickets.filter((t) => t.state === "complete").map((t) => t.id));
+  for (const t of tickets) {
+    t.waitingOn = (t.blockedBy.match(/T\d+/g) ?? []).filter((b) => !done.has(b));
+    if (t.state === "todo" || t.state === "ready" || t.state === "waiting") t.state = t.waitingOn.length ? "waiting" : "ready";
+  }
+}
+
+// Copies of one plan on different branches: the lead marks IN PROGRESS on the ticket's branch
+// while the default branch only learns COMPLETE. Each ticket takes its furthest state.
+const RANK = { complete: 3, progress: 2, blocked: 1 };
+function mergeTickets(best, copies) {
+  for (const t of best.tickets) for (const c of copies) {
+    const o = c.tickets.find((k) => k.id === t.id);
+    if (o && (RANK[o.state] ?? 0) > (RANK[t.state] ?? 0)) Object.assign(t, { status: o.status, label: o.label, detail: o.detail, state: o.state });
+  }
+  settle(best.tickets);
+  return best;
+}
+
 export function parsePlan(text, file) {
   const lines = text.split("\n");
   const title = (lines.find((l) => /^# /.test(l)) ?? "").replace(/^#\s+(Plan:\s*)?/, "").trim() || file;
@@ -44,12 +65,7 @@ export function parsePlan(text, file) {
       });
     }
   }
-  const done = new Set(tickets.filter((t) => t.state === "complete").map((t) => t.id));
-  for (const t of tickets) {
-    const blockers = (t.blockedBy.match(/T\d+/g) ?? []).filter((b) => !done.has(b));
-    t.waitingOn = blockers;
-    if (t.state === "todo") t.state = blockers.length ? "waiting" : "ready";
-  }
+  settle(tickets);
   return {
     file, title, tickets,
     status: st?.[1] ?? "NO STATUS", statusDate: st?.[2] ?? null,
@@ -68,10 +84,47 @@ async function repoRoot(folder, on) {
   return common?.endsWith("/.git") ? common.slice(0, -5) : top || null;
 }
 
+// Every copy of every plan: each worktree's docs/plans (a plan often lives only on the branches
+// the work happens on) and the default branch's tree. One line per copy: "<mtime>\t<file>\t<source>",
+// source being an absolute path or "git:<ref>".
+const LIST_SCRIPT = `
+cd "$1" || exit 0
+git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | while IFS= read -r w; do
+  for f in "$w"/${PLANS_DIR}/*.plan.md; do
+    [ -f "$f" ] || continue
+    m=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
+    printf '%s\\t%s\\t%s\\n' "$m" "\${f##*/}" "$f"
+  done
+done
+ref=$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || echo main)
+git ls-tree --name-only "$ref" -- ${PLANS_DIR}/ 2>/dev/null | grep '\\.plan\\.md$' | while IFS= read -r f; do
+  printf '0\\t%s\\tgit:%s\\n' "\${f##*/}" "$ref"
+done`;
+
 async function listPlans(root, on) {
-  const r = await exec("sh", ["-c", 'cd "$1/' + PLANS_DIR + '" 2>/dev/null && ls -1 *.plan.md 2>/dev/null', "plans", root], { on }).catch(() => null);
-  return r?.stdout.split("\n").map((s) => s.trim()).filter(Boolean) ?? [];
+  const r = await exec("sh", ["-c", LIST_SCRIPT, "plans", root], { on }).catch(() => null);
+  const copies = new Map();   // file -> [{ mtime, source }]
+  for (const line of r?.stdout.split("\n") ?? []) {
+    const [mtime, file, source] = line.split("\t");
+    if (!file || !source) continue;
+    if (!copies.has(file)) copies.set(file, []);
+    copies.get(file).push({ mtime: Number(mtime) || 0, source });
+  }
+  return copies;
 }
+
+async function readCopy(root, on, file, source) {
+  if (!source.startsWith("git:")) return readTextFile(source, { on }).catch(() => null);
+  const r = await exec("git", ["show", `${source.slice(4)}:${PLANS_DIR}/${file}`], { cwd: root, on }).catch(() => null);
+  return r?.code === 0 ? r.stdout : null;
+}
+
+// Ticket states only move forward, so the most advanced copy is the current one (file times
+// aren't: checking out an old branch gives an old plan a new time).
+const STAGE = { "AWAITING APPROVAL": 1, APPROVED: 2, ARCHIVED: 3 };
+const advance = (p) => [STAGE[p.status] ?? 0, p.tickets.filter((k) => k.state === "complete").length,
+  p.tickets.length, p.tickets.filter((k) => k.state === "progress").length, p.mtime];
+const ahead = (a, b) => { const x = advance(a), y = advance(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false; };
 
 // The shown space's folders: its start folder and its panes' live folders.
 function candidates(space) {
@@ -139,16 +192,24 @@ export default class Plans extends View {
         }
         const repos = [];
         for (const { root, on } of roots.values()) {
-          const files = await listPlans(root, on);
-          if (!files.length) continue;
+          const copies = await listPlans(root, on);
+          if (!copies.size) continue;
           const plans = [];
-          for (const f of files) {
-            const text = await readTextFile(`${root}/${PLANS_DIR}/${f}`, { on }).catch(() => null);
-            if (text != null) plans.push({ ...parsePlan(text, f), path: `${root}/${PLANS_DIR}/${f}`, on, key: `${on ?? ""}:${root}/${f}` });
+          for (const [f, list] of copies) {
+            let best = null; const all = [];
+            for (const { mtime, source } of list) {
+              const text = await readCopy(root, on, f, source);
+              if (text == null) continue;
+              const plan = { ...parsePlan(text, f), mtime, source, on, key: `${on ?? ""}:${root}/${f}`,
+                path: source.startsWith("git:") ? `${root}/${PLANS_DIR}/${f}` : source };
+              all.push(plan);
+              if (!best || ahead(plan, best)) best = plan;
+              if (!on && !source.startsWith("git:")) this.watch(source.slice(0, source.lastIndexOf("/")), cx);
+            }
+            if (best) plans.push(best.status === "ARCHIVED" ? best : mergeTickets(best, all));
           }
           plans.sort((a, b) => (ORDER[a.status] ?? 5) - (ORDER[b.status] ?? 5) || (b.date ?? "").localeCompare(a.date ?? "") || a.file.localeCompare(b.file));
           repos.push({ root, on, name: (on ? `${on}:` : "") + root.split("/").pop(), plans });
-          if (!on) this.watch(`${root}/${PLANS_DIR}`, cx);
         }
         repos.sort((a, b) => a.name.localeCompare(b.name));
         if (activeSpace()?.id !== spaceId) { this.again = true; return; }

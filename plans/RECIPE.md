@@ -34,6 +34,12 @@ and the Herdr agents working on them. ↗ on a plan opens the plan file in the F
 
 - **Which plans:** the active space's folder and its panes' folders resolve to a repo; worktrees
   resolve to their main checkout (`git rev-parse --git-common-dir`), so a plan shows once.
+  Every copy is read: each worktree's `docs/plans` (`git worktree list`) and the default
+  branch's tree (`origin/HEAD`, else `main`, via `git show`); a plan often exists only on the
+  branches where work happens. The shown copy is the most advanced one (plan status, then
+  complete tickets, ticket count, in-progress tickets, file time), and each ticket then takes
+  its furthest state across copies (COMPLETE > IN PROGRESS > BLOCKED > TO-DO), since a lead marks
+  IN PROGRESS on the ticket's branch and the default branch only learns COMPLETE.
   Switching spaces rescans. Plans without a `Status:` line and ARCHIVED plans are hidden until
   **Archived N** is on. Order: AWAITING APPROVAL, APPROVED, then newest date first.
 - **Ticket states** from the Tickets table's Status cell: `COMPLETE…` ✓ (`ansi2` green);
@@ -53,7 +59,7 @@ and the Herdr agents working on them. ↗ on a plan opens the plan file in the F
   Satisfies, Blocked by, Owner, Agents.
 - `↗` sets shared `plans.reveal = { path, at }`, selects `files` in `panel-body` and shows
   `panel`; the Files panel opens that file's preview.
-- Refresh: a folder watch on each repo's `docs/plans`, every 20s, and on `↻`.
+- Refresh: a folder watch on every local `docs/plans` copy, every 20s, and on `↻`.
 
 ## Built from
 
@@ -71,6 +77,8 @@ and the Herdr agents working on them. ↗ on a plan opens the plan file in the F
 
 ## Watch out
 
+- File times can't pick the current copy: checking out an old branch gives an old plan a new
+  time. Rank copies by ticket progress instead.
 - Files resets its preview whenever its folder context changes (focus moving). Without the
   re-apply, the opened file vanishes as soon as focus shifts.
 - `terminals()` carries no task text, so ticket attribution is by worker name. Name workers
