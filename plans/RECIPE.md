@@ -32,7 +32,7 @@ and the Herdr agents working on them. ↗ on a plan opens the plan file in the F
 
 ## How it behaves
 
-- **Which plans:** the active space's folder and its panes' folders resolve to a repo; worktrees
+- **Which plans:** the active space's panes' live folders (its `folder` only when no pane has one: it is where new terminals start and can be stale) resolve to a repo; worktrees
   resolve to their main checkout (`git rev-parse --git-common-dir`), so a plan shows once.
   Every copy is read: each worktree's `docs/plans` (`git worktree list`) and the default
   branch's tree (`origin/HEAD`, else `main`, via `git show`); a plan often exists only on the

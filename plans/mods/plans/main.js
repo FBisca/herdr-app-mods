@@ -126,14 +126,15 @@ const advance = (p) => [STAGE[p.status] ?? 0, p.tickets.filter((k) => k.state ==
   p.tickets.length, p.tickets.filter((k) => k.state === "progress").length, p.mtime];
 const ahead = (a, b) => { const x = advance(a), y = advance(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false; };
 
-// The shown space's folders: its start folder and its panes' live folders.
+// The shown space's live folders: its panes' (terminals'). Its `folder` is only where new
+// terminals start and can be stale (the folder it was made in), so it's the fallback.
 function candidates(space) {
   const out = new Map();
   if (!space) return [];
   const add = (folder) => { if (folder) out.set(folder, { folder, on: space.machine ?? null }); };
-  add(space.folder);
   const tabs = new Set((space.tabs ?? []).map((t) => t.id));
   for (const p of panes()) if (p.cwd && tabs.has(p.tab)) add(p.cwd);
+  if (!out.size) add(space.folder);
   return [...out.values()];
 }
 const activeSpace = () => spaces().find((s) => s.active) ?? null;
@@ -296,7 +297,7 @@ export default class Plans extends View {
 
   agentName(term) {
     const a = agents().find((x) => x.address === term.address);
-    return term.name || a?.tab_name || a?.title || term.agent || term.address;
+    return term.name || a?.title || (/^\d+$/.test(a?.tab_name ?? "") ? null : a?.tab_name) || a?.space_name || term.agent || term.address;
   }
 
   agentRow(list, t, prefix) {
